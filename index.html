@@ -116,7 +116,7 @@ var BOX_KEY='jm-outbox-v1',FORM_KEY='jm-form-v1',CACHE_KEY='jm-orders-cache-v1';
 var STATUS={sent:'Sent to office',negotiation:'Price request sent',replied:'Office replied',confirmed:'Confirmed',dispatched:'Dispatched',cancelled:'Cancelled'};
 var ERR={invalid_state:'This order has already changed. The list has been refreshed.',order_not_found:'Order not found.',not_allowed:'This login cannot do that.',amount_required:'Enter the amount.',
   delivery_date_required:'Choose the delivery date.',customer_required:'Enter the customer name.',bad_item:'Check the items: each needs a name, a quantity above 0 and a rate.',no_items:'Add at least one item.',bad_action:'This action is not available.'};
-var state={status:'boot',profile:null,orders:[],products:[],events:[],view:'home',openId:null,filter:'all',q:'',form:{},panel:null,confirm:null,busy:false,err:'',loadErr:'',box:[],order:blankOrder(),offline:false};
+var state={status:'boot',profile:null,orders:[],products:[],customers:[],events:[],view:'home',openId:null,filter:'all',q:'',form:{},panel:null,confirm:null,busy:false,err:'',loadErr:'',box:[],order:blankOrder(),offline:false};
 var app=document.getElementById('app');
 
 /* ---------- helpers ---------- */
@@ -135,7 +135,7 @@ function uuid(){if(window.crypto&&crypto.randomUUID)return crypto.randomUUID();r
 function find(list,id){for(var i=0;i<list.length;i++){if(list[i].id===id)return list[i];}return null;}
 function lineAmt(it){return (parseFloat(it.qty)||0)*(parseFloat(it.rate)||0);}
 function subtotalOf(items){return items.reduce(function(s,it){return s+lineAmt(it);},0);}
-function blankOrder(){return {customer:'',phone:'',place:'',discount:'',delivery:'',notes:'',items:[{name:'',qty:'',unit:'',rate:''}]};}
+function blankOrder(){return {customerId:'',customer:'',phone:'',place:'',discount:'',delivery:'',notes:'',items:[{name:'',qty:'',unit:'',rate:''}]};}
 function effTotal(o){if(o.final_total!=null)return Number(o.final_total);if(o.status==='replied'&&o.agreed_total!=null)return Number(o.agreed_total);return Number(o.total);}
 function pill(s){return '<span class="pill s-'+s+'">'+esc(STATUS[s]||s)+'</span>';}
 function dueHtml(o){
@@ -172,10 +172,10 @@ async function flush(){
 /* ---------- data ---------- */
 function upsertOrder(o){var i=-1;state.orders.forEach(function(x,k){if(x.id===o.id)i=k;});if(i>=0)state.orders[i]=o;else state.orders.unshift(o);state.orders.sort(function(a,b){return (a.updated_at||'')<(b.updated_at||'')?1:-1;});}
 async function loadAll(){
-  var res=await Promise.all([sb.from('orders').select('*').order('updated_at',{ascending:false}).range(0,999),sb.from('products').select('*').order('name',{ascending:true})]);
-  if(res[0].error)throw res[0].error;
-  state.orders=res[0].data||[];state.products=(res[1].data||[]);state.loadErr='';state.offline=false;
-  lsSet(CACHE_KEY+':'+state.profile.id,{orders:state.orders,products:state.products});
+  var res=await Promise.all([sb.from('orders').select('*').order('updated_at',{ascending:false}).range(0,999),sb.from('products').select('*').order('name',{ascending:true}),sb.from('customers').select('*').eq('active',true).order('name',{ascending:true})]);
+  if(res[0].error)throw res[0].error;if(res[1].error)throw res[1].error;if(res[2].error)throw res[2].error;
+  state.orders=res[0].data||[];state.products=(res[1].data||[]);state.customers=res[2].data||[];state.loadErr='';state.offline=false;
+  lsSet(CACHE_KEY+':'+state.profile.id,{orders:state.orders,products:state.products,customers:state.customers});
 }
 async function loadEvents(){
   if(!state.openId){state.events=[];return;}
@@ -211,7 +211,7 @@ async function enter(session){
   else if(!pr.active){state.status='inactive';}
   else{
     lsSet('jm-profile-'+pr.id,pr);
-    var cache=lsGet(CACHE_KEY+':'+pr.id,null);if(cache){state.orders=cache.orders||[];state.products=cache.products||[];}
+    var cache=lsGet(CACHE_KEY+':'+pr.id,null);if(cache){state.orders=cache.orders||[];state.products=cache.products||[];state.customers=cache.customers||[];}
     loadBox();state.order=lsGet(FORM_KEY,null)||blankOrder();
     state.status='ready';render();
     try{await loadAll();}catch(e){state.offline=true;state.loadErr='';}
@@ -273,15 +273,19 @@ function homeView(){
 function formView(){
   var f=state.order,sub=subtotalOf(f.items),d=Math.min(Math.max(parseFloat(f.discount)||0,0),sub);
   var h='<div class="top"><button class="btn" data-action="back">← Back</button><button class="btn btn-small" data-action="clear-form">Clear form</button></div><h1>New order</h1>';
-  h+='<div class="card stack"><div class="field"><span>Customer / shop name</span><input type="text" id="o-cust" data-ord="customer" autocomplete="off" value="'+esc(f.customer)+'" placeholder="e.g. Gupta General Store"></div>'+
-    '<div class="row2"><div class="field"><span>Phone (optional)</span><input type="tel" id="o-phone" data-ord="phone" value="'+esc(f.phone)+'"></div><div class="field"><span>Market / area (optional)</span><input type="text" id="o-place" data-ord="place" autocomplete="off" value="'+esc(f.place)+'" placeholder="e.g. Aminabad"></div></div>'+
-    '<div class="field"><span>Delivery date (when to deliver)</span><input type="date" id="o-deliv" data-ord="delivery" min="'+todayStr()+'" value="'+esc(f.delivery)+'"></div></div>';
-  h+='<div class="card stack"><h2>Items</h2><datalist id="plist">'+state.products.map(function(p){return '<option value="'+esc(p.name)+'"></option>';}).join('')+'</datalist>';
+  h+='<div class="card stack"><div class="field"><span>Customer / shop (Office list)</span><select id="o-customer" data-ord="customerId" required><option value="">Choose a registered shop</option>'+state.customers.map(function(c){return '<option value="'+esc(c.id)+'"'+(f.customerId===c.id?' selected':'')+'>'+esc(c.name)+'</option>';}).join('')+'</select></div>'+
+    (!state.customers.length?'<p class="hint">No active customers. Add the customer list in the Office app.</p>':'')+
+    '<div class="field"><span>Customer name</span><input type="text" id="o-cust" data-ord="customer" readonly value="'+esc(f.customer)+'"></div>'+
+    '<div class="row2"><div class="field"><span>Phone</span><input type="tel" id="o-phone" data-ord="phone" readonly value="'+esc(f.phone)+'"></div><div class="field"><span>Address / area</span><input type="text" id="o-place" data-ord="place" readonly value="'+esc(f.place)+'"></div></div>'+
+    '<div class="field"><span>Delivery date</span><input type="date" id="o-deliv" data-ord="delivery" min="'+todayStr()+'" value="'+esc(f.delivery)+'"></div></div>';
+  h+='<div class="card stack"><h2>Items</h2>';
   f.items.forEach(function(it,i){
-    h+='<div class="itemrow"><div class="field"><span>Product</span><input type="text" id="i'+i+'-name" list="plist" data-ii="'+i+'" data-if="name" autocomplete="off" value="'+esc(it.name)+'" placeholder="Type or pick a product"></div>'+
-      '<div class="line"><div class="field"><span>Qty</span><input type="number" id="i'+i+'-qty" data-ii="'+i+'" data-if="qty" inputmode="decimal" min="0" step="any" value="'+esc(it.qty)+'"></div>'+
-      '<div class="field"><span>Unit</span><input type="text" id="i'+i+'-unit" data-ii="'+i+'" data-if="unit" autocomplete="off" value="'+esc(it.unit)+'" placeholder="pcs"></div>'+
-      '<div class="field"><span>Rate (₹)</span><input type="number" id="i'+i+'-rate" data-ii="'+i+'" data-if="rate" inputmode="decimal" min="0" step="any" value="'+esc(it.rate)+'"></div></div>'+
+    var selectedProduct=state.products.filter(function(p){return String(p.name).toLowerCase()===String(it.name).toLowerCase();})[0];
+    h+='<div class="itemrow"><div class="field"><span>Product</span><select id="i'+i+'-name" data-ii="'+i+'" data-if="name" required><option value="">Choose a product</option>'+state.products.map(function(p){return '<option value="'+esc(p.name)+'"'+(it.name===p.name?' selected':'')+'>'+esc(p.name)+'</option>';}).join('')+'</select></div>'+
+      '<div class="line"><div class="field"><span>Qty</span><input type="number" id="i'+i+'-qty" data-ii="'+i+'" data-if="qty" inputmode="decimal" min="0" max="'+esc(selectedProduct?selectedProduct.stock:0)+'" step="any" value="'+esc(it.qty)+'"></div>'+
+      '<div class="field"><span>Unit</span><input type="text" id="i'+i+'-unit" data-ii="'+i+'" data-if="unit" readonly value="'+esc(it.unit)+'"></div>'+
+      '<div class="field"><span>Rate (₹)</span><input type="number" id="i'+i+'-rate" data-ii="'+i+'" data-if="rate" inputmode="decimal" min="0" step="any" readonly value="'+esc(it.rate)+'"></div></div>'+
+      '<p class="hint">Available stock: '+esc(selectedProduct?selectedProduct.stock:0)+' '+esc(selectedProduct?selectedProduct.unit||'':'')+'</p>'+
       '<div class="top"><span class="sub">Amount</span><span class="amt" id="amt-'+i+'">'+money(lineAmt(it))+'</span></div>'+
       (f.items.length>1?'<button class="btn btn-small btn-danger" type="button" data-action="rm-item" data-i="'+i+'" style="align-self:flex-start">Remove item</button>':'')+'</div>';
   });
@@ -358,21 +362,25 @@ function go(patch){Object.keys(patch).forEach(function(k){state[k]=patch[k];});s
 
 /* ---------- actions ---------- */
 function buildArgs(){
-  var f=state.order,name=f.customer.trim();
-  if(!name){toast('Enter the customer name.');return null;}
+  var f=state.order,customer=find(state.customers,f.customerId),name=customer?customer.name.trim():'';
+  if(!customer){toast('Choose a registered customer from the Office list.');return null;}
   if(!f.delivery){toast('Choose the delivery date.');return null;}
   var items=[];
   for(var i=0;i<f.items.length;i++){
     var it=f.items[i];if(!it.name.trim()&&!it.qty&&!it.rate)continue;
     var q=parseFloat(it.qty),r=parseFloat(it.rate);
-    if(!it.name.trim()){toast('Item '+(i+1)+' needs a product name.');return null;}
+    var product=state.products.filter(function(p){return p.name===it.name;})[0];
+    if(!product){toast('Choose a product from the Office catalogue.');return null;}
     if(!isFinite(q)||q<=0){toast('Enter a quantity for '+it.name.trim()+'.');return null;}
-    if(!isFinite(r)||r<0){toast('Enter a rate for '+it.name.trim()+'.');return null;}
-    items.push({name:it.name.trim(),qty:q,unit:it.unit.trim(),rate:r});
+    if(!isFinite(r)||r<0){toast('Product rate is invalid.');return null;}
+    if(q>Number(product.stock||0)){toast('Not enough stock for '+product.name+'. Available: '+product.stock+' '+(product.unit||''));return null;}
+    items.push({name:product.name,qty:q,unit:product.unit||'',rate:Number(product.rate)});
   }
   if(!items.length){toast('Add at least one item.');return null;}
+  var totals={};items.forEach(function(it){totals[it.name]=(totals[it.name]||0)+Number(it.qty);});
+  for(var productName in totals){var p0=state.products.filter(function(p){return p.name===productName;})[0];if(p0&&totals[productName]>Number(p0.stock||0)){toast('Order quantity exceeds stock for '+productName+'.');return null;}}
   var sub=subtotalOf(items);
-  return {p_client_id:uuid(),p_customer_name:name,p_customer_phone:f.phone.trim(),p_customer_place:f.place.trim(),p_items:items,p_discount:Math.min(Math.max(parseFloat(f.discount)||0,0),sub),p_notes:f.notes.trim(),p_delivery_date:f.delivery};
+  return {p_client_id:uuid(),p_customer_name:name,p_customer_phone:customer.phone||'',p_customer_place:customer.address||'',p_items:items,p_discount:Math.min(Math.max(parseFloat(f.discount)||0,0),sub),p_notes:f.notes.trim(),p_delivery_date:f.delivery};
 }
 async function sendOrder(){
   if(state.busy)return;var args=buildArgs();if(!args)return;
@@ -430,11 +438,14 @@ app.addEventListener('input',function(ev){
 });
 app.addEventListener('change',function(ev){
   var t=ev.target;
-  if(t.hasAttribute('data-ord')){state.order[t.getAttribute('data-ord')]=t.value;saveForm();}
+  if(t.hasAttribute('data-ord')){
+    var key=t.getAttribute('data-ord');state.order[key]=t.value;
+    if(key==='customerId'){var customer=find(state.customers,t.value);state.order.customer=customer?customer.name:'';state.order.phone=customer?customer.phone||'':'';state.order.place=customer?customer.address||'':'';render();}
+    saveForm();
+  }
   if(t.getAttribute('data-if')==='name'){
-    var it=state.order.items[+t.getAttribute('data-ii')],nm=t.value.trim().toLowerCase();
-    var p=state.products.filter(function(x){return String(x.name).toLowerCase()===nm;})[0];
-    if(it&&p){if(!it.unit)it.unit=p.unit||'';if(!it.rate)it.rate=String(p.rate);saveForm();render();}
+    var it=state.order.items[+t.getAttribute('data-ii')],p=state.products.filter(function(x){return x.name===t.value;})[0];
+    if(it&&p){it.name=p.name;it.unit=p.unit||'';it.rate=String(p.rate);it.qty='';saveForm();render();}
   }
 });
 app.addEventListener('submit',async function(ev){
